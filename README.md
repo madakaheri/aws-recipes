@@ -1,10 +1,33 @@
 # AWS レシピ集
 
-AWS構築のレシピをまとめています。
+AWS構築のレシピをまとめています（随時更新）
+
+> 私の業務知識から書き出しているため、**node.js に偏った内容になっています。**
 
 ## 目次
 
-- [Cognito認証](./docs/Cognito認証.md)
-- [S3画像のホスティング](./docs/S3画像のホスティング.md)
-- [静的サイトのホスティング](./docs/静的サイトのホスティング.md)
-- [マイクロサービス](./docs/マイクロサービス.md)
+### アーキテクチャ
+
+- [Cognito認証](./docs/アーキテクチャ/Cognito認証.md)
+- [S3画像のホスティング](./docs/アーキテクチャ/S3画像のホスティング.md)
+- [静的サイトのホスティング](./docs/アーキテクチャ/静的サイトのホスティング.md)
+- [マイクロサービス](./docs/アーキテクチャ/マイクロサービス.md)
+- [RDS(SQLデータベース)](./docs/アーキテクチャ/RDS(SQLデータベース).md)
+
+### Lambda
+
+- [puppeteetでスクレイピング](./docs/Lambda/puppeteetでスクレイピング.md)
+- [shapで画像処理](./docs/Lambda/shapで画像処理.md)
+- [サーバーレスLaravel](./docs/Lambda/サーバーレスLaravel.md)
+
+## おすすめパッケージ
+
+### npm - nodejs向け
+
+- [@dependahub/aws-lambda](https://www.npmjs.com/package/@dependahub/aws-lambda)
+- [@dependahub/aws-s3](https://www.npmjs.com/package/@dependahub/aws-s3)
+- [@dependahub/aws-rds-data](https://www.npmjs.com/package/@dependahub/aws-rds-data)
+
+## おすすめフレームワーク
+
+- [@madakaheri/microservice-framework](https://github.com/madakaheri/microservice-framework)
