@@ -1,0 +1,263 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description:
+  Amplify で利用する Cognito（User Pool, Identity Pool）、S3 バケット、REST API を構築する SAM テンプレートの例
+  - Cognito User Pool は既存のものを利用
+  - S3 バケットはユーザーごとに private 配下にアクセス可能
+  - REST API は認証なし（IAM）と認証あり（Cognito User Pool）の2つのエンドポイントを用意
+
+Parameters:
+  Env:
+    Type: String
+    Default: dev
+    Description: 環境名（dev, stg, prod など）
+  UserPoolId:
+    Type: String
+    Description: 既存の Cognito ユーザープールID（ap-northeast-1_xxxxx 等）
+  AllowedOrigins:
+    Type: String
+    Default: "https://localhost:3000"
+    Description: CORS（クロスオリジン許可）のオリジン
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Timeout: 28
+    MemorySize: 256
+
+Resources:
+  # ---------------- UserPoolClient ----------------
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPoolId
+      ClientName: !Sub "${AWS::StackName}-userpool-client-${Env}"
+      GenerateSecret: false
+      PreventUserExistenceErrors: ENABLED
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+
+  # ---------------- Identity Pool ----------------
+  IdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      IdentityPoolName: !Sub "${AWS::StackName}-identity-pool-${Env}"
+      AllowUnauthenticatedIdentities: true
+      CognitoIdentityProviders:
+        - ClientId: !Ref UserPoolClient
+          ProviderName: !Sub "cognito-idp.${AWS::Region}.amazonaws.com/${UserPoolId}"
+
+  # ---------------- S3: UserBucket ----------------
+  UserBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-user-${Env}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins: [!Ref AllowedOrigins]
+            AllowedMethods: ["GET","PUT","POST","DELETE"]
+            AllowedHeaders: ["Authorization","Content-Type","x-amz-date","x-amz-security-token","x-amz-content-sha256"]
+            ExposedHeaders: ["ETag"]
+            MaxAge: 600
+
+  UserBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref UserBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EnforceTLS
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !Sub "arn:aws:s3:::${UserBucket}"
+              - !Sub "arn:aws:s3:::${UserBucket}/*"
+            Condition:
+              Bool: { aws:SecureTransport: "false" }
+
+  # ---------------- IAM Roles ----------------
+  AuthRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-auth-role-${Env}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Federated: cognito-identity.amazonaws.com }
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals: { cognito-identity.amazonaws.com:aud: !Ref IdentityPool }
+              ForAnyValue:StringLike: { cognito-identity.amazonaws.com:amr: authenticated }
+      Policies:
+        - PolicyName: InvokeApiAuth
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: execute-api:Invoke
+                Resource:
+                  - !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/${Env}/GET/auth"
+                  - !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/${Env}/GET/unauth"
+        - PolicyName: UserBucketSelfScopedCrud
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ["s3:PutObject","s3:GetObject","s3:DeleteObject"]
+                Resource: !Sub "arn:aws:s3:::${UserBucket}/private/${cognito-identity.amazonaws.com:sub}/*"
+              - Effect: Allow
+                Action: "s3:ListBucket"
+                Resource: !Sub "arn:aws:s3:::${UserBucket}"
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - !Sub "private/${cognito-identity.amazonaws.com:sub}/*"
+                      - !Sub "private/${cognito-identity.amazonaws.com:sub}/"
+
+  UnauthRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-unauth-role-${Env}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Federated: cognito-identity.amazonaws.com }
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals: { cognito-identity.amazonaws.com:aud: !Ref IdentityPool }
+              ForAnyValue:StringLike: { cognito-identity.amazonaws.com:amr: unauthenticated }
+      Policies:
+        - PolicyName: InvokeApiUnauth
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: execute-api:Invoke
+                Resource: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/${Env}/GET/unauth"
+
+  IdentityPoolRoleAttachment:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId: !Ref IdentityPool
+      Roles:
+        authenticated: !GetAtt AuthRole.Arn
+        unauthenticated: !GetAtt UnauthRole.Arn
+
+  # ---------------- REST API ----------------
+  RestApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref Env
+      EndpointConfiguration: REGIONAL
+      Cors:
+        AllowOrigin: !Ref AllowedOrigins
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'Authorization,Content-Type,X-Amz-Date,X-Amz-Security-Token'"
+      Auth:
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !Sub arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}
+            Identity: { Header: Authorization }
+        DefaultAuthorizer: NONE
+
+  # /unauth: IAM（ゲストもIDプール経由で可）
+  UnauthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-unauth-${Env}"
+      CodeUri: src/unauth/
+      Handler: index.handler
+      Events:
+        UnauthApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /unauth
+            Method: GET
+            Auth:
+              Authorizer: AWS_IAM
+
+  # /auth: Cognito ユーザープール（JWT）
+  AuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-auth-${Env}"
+      CodeUri: src/auth/
+      Handler: index.handler
+      Events:
+        AuthApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /auth
+            Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+Outputs:
+  # --- 共通/リージョン ---
+  ProjectRegion:
+    Description: Amplify aws_project_region（= デプロイリージョン）
+    Value: !Sub "${AWS::Region}"
+
+  CognitoRegion:
+    Description: Amplify aws_cognito_region（= デプロイリージョン）
+    Value: !Sub "${AWS::Region}"
+
+  # --- Auth（Cognito） ---
+  UserPoolIdOut:
+    Description: Amplify aws_user_pools_id
+    Value: !Ref UserPoolId
+
+  UserPoolClientIdOut:
+    Description: Amplify aws_user_pools_web_client_id
+    Value: !Ref UserPoolClient
+
+  IdentityPoolIdOut:
+    Description: Amplify aws_cognito_identity_pool_id
+    Value: !Ref IdentityPool
+
+  # --- Storage（S3） ---
+  UserFilesS3Bucket:
+    Description: Amplify aws_user_files_s3_bucket
+    Value: !Ref UserBucket
+
+  UserFilesS3BucketRegion:
+    Description: Amplify aws_user_files_s3_bucket_region
+    Value: !Sub "${AWS::Region}"
+
+  # --- REST API（aws_cloud_logic_custom 用） ---
+  ApiName:
+    Description: Amplify aws_cloud_logic_custom[0].name
+    Value: !Sub "${AWS::StackName}-api-${Env}"
+
+  ApiEndpoint:
+    Description: Amplify aws_cloud_logic_custom[0].endpoint
+    Value: !Sub "https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/${Env}"
+
+  ApiRegion:
+    Description: Amplify aws_cloud_logic_custom[0].region
+    Value: !Sub "${AWS::Region}"
+
+  # --- 参考：個別URL（任意） ---
+  UnauthUrl:
+    Description: 参考：/unauth
+    Value: !Sub "https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/${Env}/unauth"
+
+  AuthUrl:
+    Description: 参考：/auth
+    Value: !Sub "https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/${Env}/auth"
